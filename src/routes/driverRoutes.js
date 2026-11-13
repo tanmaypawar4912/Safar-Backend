@@ -1,8 +1,10 @@
+
 import express from "express";
 import multer from "multer";
 
 import {
   submitDriverProfile,
+  updateDriverProfile,
   getMyDriverProfile,
   requestDriverProfileChange,
   setDriverAvailability,
@@ -10,6 +12,7 @@ import {
   reviewDriverProfile,
   reviewDriverProfileChange,
   getDriverVehicles,
+  updateDriverVehicle,
   addDriverVehicle,
   selectActiveDriverVehicle,
   requestDriverVehicleChange,
@@ -17,6 +20,10 @@ import {
   reviewDriverVehicleChange,
   listDriverActivities,
 } from "../controllers/driverController.js";
+
+import {
+  uploadDriverProfilePhoto,
+} from "../controllers/driverProfilePhotoController.js";
 
 import {
   listDriverProfilesForAdmin,
@@ -72,9 +79,9 @@ const upload = multer({
   },
 });
 
-// ---------------------------------------------------------------------
+// ============================================================
 // DRIVER MEDIA APIs
-// ---------------------------------------------------------------------
+// ============================================================
 
 router.post(
   "/media/upload",
@@ -97,10 +104,21 @@ router.delete(
   deleteDriverMediaAsset
 );
 
-// ---------------------------------------------------------------------
+// ============================================================
 // DRIVER PROFILE APIs
-// ---------------------------------------------------------------------
+// ============================================================
 
+// Upload the authenticated driver's profile photo.
+router.post(
+  "/profile/photo",
+  protect,
+  authorizeRoles("driver"),
+  upload.single("file"),
+  uploadDriverProfilePhoto
+);
+
+// Create the initial driver onboarding profile.
+// The driver remains offline and pending admin approval.
 router.post(
   "/profile",
   protect,
@@ -110,6 +128,7 @@ router.post(
   submitDriverProfile
 );
 
+// Read the authenticated driver's profile.
 router.get(
   "/profile",
   protect,
@@ -117,6 +136,17 @@ router.get(
   getMyDriverProfile
 );
 
+// Update an existing driver profile.
+router.patch(
+  "/profile",
+  protect,
+  authorizeRoles("driver"),
+  validate(driverProfileSchema),
+  validateDriverPhotoOwnership,
+  updateDriverProfile
+);
+
+// Submit an admin-reviewed profile-change request.
 router.post(
   "/profile/change-request",
   protect,
@@ -125,6 +155,7 @@ router.post(
   requestDriverProfileChange
 );
 
+// Update driver online/offline availability.
 router.patch(
   "/availability",
   protect,
@@ -133,16 +164,18 @@ router.patch(
   setDriverAvailability
 );
 
+// List approved online drivers.
 router.get(
   "/online",
   protect,
   getOnlineDrivers
 );
 
-// ---------------------------------------------------------------------
+// ============================================================
 // DRIVER VEHICLE APIs
-// ---------------------------------------------------------------------
+// ============================================================
 
+// Read the authenticated driver's registered vehicle.
 router.get(
   "/vehicles",
   protect,
@@ -150,6 +183,19 @@ router.get(
   getDriverVehicles
 );
 
+// Update the existing registered vehicle.
+// Frontend uses PATCH /drivers/vehicles/:vehicleId.
+router.patch(
+  "/vehicles/:vehicleId",
+  protect,
+  authorizeRoles("driver"),
+  validate(driverVehicleSchema),
+  validateDriverPhotoOwnership,
+  updateDriverVehicle
+);
+
+// Retained legacy endpoint for compatibility.
+// Initial vehicle creation is handled through POST /profile.
 router.post(
   "/vehicles",
   protect,
@@ -159,6 +205,7 @@ router.post(
   addDriverVehicle
 );
 
+// Vehicle switching is disabled for the one-vehicle-per-driver model.
 router.patch(
   "/vehicles/:vehicleId/active",
   protect,
@@ -166,6 +213,7 @@ router.patch(
   selectActiveDriverVehicle
 );
 
+// Submit an admin-reviewed vehicle change request.
 router.post(
   "/vehicles/:vehicleId/change-request",
   protect,
@@ -175,10 +223,11 @@ router.post(
   requestDriverVehicleChange
 );
 
-// ---------------------------------------------------------------------
+// ============================================================
 // ADMIN DRIVER APIs
-// ---------------------------------------------------------------------
+// ============================================================
 
+// List driver profiles for admin review.
 router.get(
   "/admin/profiles",
   protect,
@@ -186,6 +235,7 @@ router.get(
   listDriverProfilesForAdmin
 );
 
+// Approve or reject initial driver onboarding.
 router.patch(
   "/admin/profiles/:id/review",
   protect,
@@ -194,6 +244,7 @@ router.patch(
   reviewDriverProfile
 );
 
+// Approve or reject profile-change requests.
 router.patch(
   "/admin/profiles/:id/change-request/review",
   protect,
@@ -202,6 +253,7 @@ router.patch(
   reviewDriverProfileChange
 );
 
+// Approve or reject a registered vehicle.
 router.patch(
   "/admin/profiles/:id/vehicles/:vehicleId/review",
   protect,
@@ -210,6 +262,7 @@ router.patch(
   reviewDriverVehicle
 );
 
+// Approve or reject vehicle-change requests.
 router.patch(
   "/admin/profiles/:id/vehicles/:vehicleId/change-request/review",
   protect,
@@ -218,6 +271,7 @@ router.patch(
   reviewDriverVehicleChange
 );
 
+// List driver activity for admin.
 router.get(
   "/admin/activities",
   protect,
@@ -225,9 +279,9 @@ router.get(
   listDriverActivities
 );
 
-// ---------------------------------------------------------------------
-// Upload middleware error handling
-// ---------------------------------------------------------------------
+// ============================================================
+// UPLOAD MIDDLEWARE ERROR HANDLING
+// ============================================================
 
 router.use((error, _req, res, next) => {
   if (!error) {

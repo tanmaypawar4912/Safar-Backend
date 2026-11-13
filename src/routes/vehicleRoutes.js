@@ -1,9 +1,12 @@
 import express from "express";
-import { getVehicles, getVehicleAvailability } from "../controllers/vehicleController.js";
-
+import { getVehicles, getVehicleAvailability, getAdminVehicles, createVehicle, updateVehicle } from "../controllers/vehicleController.js";
+import { protect } from "../middleware/authMiddleware.js";
+import { authorizeRoles } from "../middleware/roleMiddleware.js";
 const router = express.Router();
-
 router.get("/availability", getVehicleAvailability);
+router.get("/admin/all", protect, authorizeRoles("admin"), getAdminVehicles);
+router.post("/admin", protect, authorizeRoles("admin"), createVehicle);
+router.patch("/admin/:id", protect, authorizeRoles("admin"), updateVehicle);
+router.patch("/admin/:id/status", protect, authorizeRoles("admin"), async (req, res, next) => { req.body = { isActive: Boolean(req.body.isActive) }; next(); }, updateVehicle);
 router.get("/", getVehicles);
-
 export default router;

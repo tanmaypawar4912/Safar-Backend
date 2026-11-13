@@ -1,3 +1,4 @@
+
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -13,13 +14,20 @@ import bookingRoutes from "./routes/bookingRoutes.js";
 import driverRoutes from "./routes/driverRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
 import complaintRoutes from "./routes/complaintRoutes.js";
+import paymentRoutes from "./routes/paymentRoutes.js";
 import enterpriseRoutes from "./routes/enterpriseRoutes.js";
 
 const app = express();
 
+const extraClientOrigins = (process.env.CLIENT_URLS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 const allowedOrigins = new Set(
   [
     env.CLIENT_URL,
+    ...extraClientOrigins,
     ...(env.NODE_ENV !== "production"
       ? [
           "http://localhost:5173",
@@ -40,33 +48,26 @@ app.use(
         new Error(`CORS blocked origin: ${origin}`)
       );
     },
-
     credentials: true,
-
-    methods: [
-      "GET",
-      "POST",
-      "PUT",
-      "PATCH",
-      "DELETE",
-      "OPTIONS",
-    ],
-
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-    ],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
 app.use(helmet());
 
 app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true }));
+
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: "100kb",
+    parameterLimit: 100,
+  })
+);
+
 app.use(cookieParser());
 
-// Driver jobs, customer tracking, and online-driver views poll periodically.
-// Keep a generous API ceiling and protect authentication separately.
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: env.NODE_ENV === "production" ? 1000 : 5000,
@@ -95,6 +96,7 @@ app.use("/api/bookings", bookingRoutes);
 app.use("/api/drivers", driverRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/complaints", complaintRoutes);
+app.use("/api/payments", paymentRoutes);
 app.use("/api/enterprise", enterpriseRoutes);
 
 app.use((req, res) => {
@@ -110,9 +112,12 @@ app.use((error, req, res, next) => {
   }
 
   if (error.message?.startsWith("CORS blocked origin:")) {
+    console.warn(error.message);
+
     return res.status(403).json({
       success: false,
-      message: "Origin is not allowed",
+      message:
+        "Origin is not allowed. Add this frontend URL to CLIENT_URLS in backend/.env.",
     });
   }
 

@@ -1,0 +1,13 @@
+import express from "express";
+import { protect } from "../middleware/authMiddleware.js";
+import { authorizeRoles } from "../middleware/roleMiddleware.js";
+import { getPaymentSettings, updatePaymentSettings, createPaymentOrder, verifyPayment, markCashCollected, getAdminPayments, adminSettleCash } from "../controllers/paymentController.js";
+const router = express.Router();
+router.get("/settings", getPaymentSettings);
+router.patch("/settings", protect, authorizeRoles("admin"), updatePaymentSettings);
+router.get("/admin/records", protect, authorizeRoles("admin"), getAdminPayments);
+router.patch("/admin/:bookingId/settle-cash", protect, authorizeRoles("admin"), adminSettleCash);
+router.post("/:bookingId/order", protect, authorizeRoles("customer"), createPaymentOrder);
+router.post("/:bookingId/verify", protect, authorizeRoles("customer"), verifyPayment);
+router.patch("/:bookingId/cash-collected", protect, authorizeRoles("driver"), markCashCollected);
+export default router;

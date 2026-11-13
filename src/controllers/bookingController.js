@@ -2,14 +2,18 @@ import { randomBytes } from "node:crypto";
 import mongoose from "mongoose";
 
 import Booking from "../models/Booking.js";
+import OperationalSetting from "../models/OperationalSetting.js";
 import DriverProfile from "../models/DriverProfile.js";
 import DriverActivity from "../models/DriverActivity.js";
+
 import { calculateFareEstimate } from "../services/fareService.js";
+
 import {
   dispatchBooking,
   driverIsDispatchEligible,
   profilesAreDispatchEligible,
 } from "../services/dispatchService.js";
+
 import {
   notifyAdminsNewBooking,
   notifyBookingStatusToCustomer,
@@ -99,36 +103,69 @@ async function logBookingActivity({
   }
 }
 
-// CUSTOMER: Create a booking and start automatic dispatch.
+// CUSTOMER: Create booking, validate COD distance and start dispatch.
 export const createBooking = async (req, res) => {
   try {
+    // The backend calculates the fare; client-supplied fare is not trusted.
     const estimate = await calculateFareEstimate(req.body);
+
+    const paymentMethod =
+      req.body.paymentMethod === "online"
+        ? "online"
+        : "cash_on_delivery";
+
+    if (paymentMethod === "cash_on_delivery") {
+      const setting = await OperationalSetting.findOne({
+        key: "default",
+      }).lean();
+
+      const maxCodKm = Number(
+        setting?.codMaxDistanceKm ??
+        process.env.COD_MAX_DISTANCE_KM ??
+        25
+      );
+
+      if (estimate.route.distanceKm > maxCodKm) {
+        throw createHttpError(
+          `Cash on delivery is available only for routes up to ${maxCodKm} km. Choose online payment for this trip.`,
+          400
+        );
+      }
+    }
 
     const booking = await Booking.create({
       bookingCode: generateBookingCode(),
       customer: req.user.userId,
       vehicle: estimate.vehicle.id,
+
       pickup: estimate.route.pickup,
       drop: estimate.route.drop,
+
       package: {
         description: req.body.packageDescription,
         weightKg: estimate.package.weightKg,
         specialInstructions: req.body.specialInstructions || "",
       },
+
       route: {
         distanceMeters: estimate.route.distanceMeters,
         distanceKm: estimate.route.distanceKm,
         durationSeconds: estimate.route.durationSeconds,
         durationMinutes: estimate.route.durationMinutes,
       },
+
       fare: estimate.fare,
       status: "pending",
+
+      paymentMethod,
       paymentStatus: "unpaid",
+
       dispatch: {
         mode: "automatic",
         status: "searching",
         offers: [],
       },
+
       statusHistory: [
         {
           status: "pending",
@@ -148,6 +185,7 @@ export const createBooking = async (req, res) => {
         vehicleId: String(booking.vehicle),
         weightKg: booking.package.weightKg,
         estimatedFare: booking.fare.estimatedFare,
+        paymentMethod,
       },
     });
 
@@ -193,8 +231,8 @@ export const createBooking = async (req, res) => {
   }
 };
 
-// CUSTOMER: Only return bookings belonging to the authenticated customer.
-// Supports the My Orders page's search, filter and pagination.
+// CUSTOMER: Return only bookings owned by the authenticated customer.
+// Supports search, status filtering and pagination.
 export const getMyBookings = async (req, res) => {
   try {
     const page = Math.max(
@@ -332,7 +370,6 @@ export const getAdminBookingQueue = async (req, res) => {
         profile.user.isActive === true
     );
 
-    // Use the same document/photo eligibility checks as automatic dispatch.
     const driverEligibility =
       await profilesAreDispatchEligible(driverCandidates);
 
@@ -445,11 +482,11 @@ export const assignDriver = async (req, res) => {
     ) {
       return res.status(409).json({
         success: false,
-        message: "Driver vehicle category or capacity does not match this booking",
+        message:
+          "Driver vehicle category or capacity does not match this booking",
       });
     }
 
-    // Reserve the driver to prevent concurrent double assignments.
     const reservedProfile = await DriverProfile.findOneAndUpdate(
       {
         user: driverUserId,
@@ -581,37 +618,54 @@ export const assignDriver = async (req, res) => {
   }
 };
 
-// DRIVER: Assigned jobs/history plus live automatic dispatch offers.
+
+// DRIVER: Return only the authenticated driver's assigned jobs
+// and currently valid automatic dispatch offers.
 export const getDriverJobs = async (req, res) => {
   try {
+    const driverUserId = String(req.user?.userId || "");
+
+    if (!driverUserId || !mongoose.isValidObjectId(driverUserId)) {
+      return res.status(401).json({
+        success: false,
+        message: "Valid authenticated driver session is required.",
+      });
+    }
+
     const now = new Date();
 
     const [jobs, profile] = await Promise.all([
-      Booking.find({ driver: req.user.userId })
+      Booking.find({
+        driver: new mongoose.Types.ObjectId(driverUserId),
+      })
         .sort({ updatedAt: -1, createdAt: -1 })
         .limit(100)
         .populate("customer", "name phone")
         .populate("vehicle", "name capacityKg slug")
         .lean(),
 
-      DriverProfile.findOne({ user: req.user.userId })
+      DriverProfile.findOne({
+        user: driverUserId,
+      })
         .select("availability approvalStatus isActive")
         .lean(),
     ]);
 
     let offers = [];
 
+    // Only an eligible online driver can receive active offers.
     if (
-      profile?.availability === "online" &&
+      profile &&
+      profile.availability === "online" &&
       profile.approvalStatus === "approved" &&
-      profile.isActive
+      profile.isActive === true
     ) {
       offers = await Booking.find({
         status: "pending",
         driver: null,
         "dispatch.offers": {
           $elemMatch: {
-            driver: req.user.userId,
+            driver: new mongoose.Types.ObjectId(driverUserId),
             status: "offered",
             expiresAt: { $gt: now },
           },
@@ -623,12 +677,16 @@ export const getDriverJobs = async (req, res) => {
         .populate("vehicle", "name capacityKg slug")
         .lean();
 
+      // Expose only this authenticated driver's offer.
       offers = offers.map((booking) => ({
         ...booking,
         dispatch: {
           ...booking.dispatch,
           offers: (booking.dispatch?.offers || []).filter(
-            (offer) => String(offer.driver) === String(req.user.userId)
+            (offer) =>
+              String(offer.driver) === driverUserId &&
+              offer.status === "offered" &&
+              new Date(offer.expiresAt) > now
           ),
         },
       }));
@@ -636,6 +694,10 @@ export const getDriverJobs = async (req, res) => {
 
     return res.status(200).json({
       success: true,
+
+      // Derived exclusively from the authenticated backend session.
+      driverUserId,
+
       count: jobs.length,
       jobs,
       offers,
@@ -645,10 +707,11 @@ export const getDriverJobs = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Unable to load driver jobs",
+      message: "Unable to load driver jobs.",
     });
   }
 };
+
 
 // DRIVER: Accept/reject a live automatic offer or a legacy admin assignment.
 export const respondToBooking = async (req, res) => {
@@ -742,7 +805,8 @@ export const respondToBooking = async (req, res) => {
 
         return res.status(200).json({
           success: true,
-          message: "Offer declined. The job remains available to other drivers or will be redispatched.",
+          message:
+            "Offer declined. The job remains available to other drivers or will be redispatched.",
           booking: rejected,
         });
       }
@@ -777,7 +841,8 @@ export const respondToBooking = async (req, res) => {
       if (!reservedProfile) {
         return res.status(409).json({
           success: false,
-          message: "You are no longer available to accept this job. Refresh your jobs.",
+          message:
+            "You are no longer available to accept this job. Refresh your jobs.",
         });
       }
 
@@ -844,7 +909,8 @@ export const respondToBooking = async (req, res) => {
 
         return res.status(409).json({
           success: false,
-          message: "Another driver accepted this job, or the offer expired. It is no longer available.",
+          message:
+            "Another driver accepted this job, or the offer expired. It is no longer available.",
         });
       }
 
@@ -868,7 +934,9 @@ export const respondToBooking = async (req, res) => {
           {
             arrayFilters: [
               {
-                "other.driver": { $ne: new mongoose.Types.ObjectId(driverUserId) },
+                "other.driver": {
+                  $ne: new mongoose.Types.ObjectId(driverUserId),
+                },
                 "other.status": "offered",
               },
             ],
@@ -919,7 +987,8 @@ export const respondToBooking = async (req, res) => {
 
       return res.status(200).json({
         success: true,
-        message: "Job accepted successfully. Other driver offers are now unavailable.",
+        message:
+          "Job accepted successfully. Other driver offers are now unavailable.",
         booking: accepted,
       });
     }
@@ -956,33 +1025,33 @@ export const respondToBooking = async (req, res) => {
 
     const update = accepting
       ? {
-          $set: { status: "accepted" },
-          $push: {
-            statusHistory: {
-              status: "accepted",
-              changedBy: driverUserId,
-              note: "Driver accepted the assigned job",
-            },
+        $set: { status: "accepted" },
+        $push: {
+          statusHistory: {
+            status: "accepted",
+            changedBy: driverUserId,
+            note: "Driver accepted the assigned job",
           },
-        }
+        },
+      }
       : {
-          $set: {
+        $set: {
+          status: "pending",
+          driver: null,
+          "dispatch.mode": "automatic",
+          "dispatch.status": "searching",
+          "dispatch.nextAttemptAt": now,
+          "dispatch.offers.$[offer].status": "lost",
+          "dispatch.offers.$[offer].respondedAt": now,
+        },
+        $push: {
+          statusHistory: {
             status: "pending",
-            driver: null,
-            "dispatch.mode": "automatic",
-            "dispatch.status": "searching",
-            "dispatch.nextAttemptAt": now,
-            "dispatch.offers.$[offer].status": "lost",
-            "dispatch.offers.$[offer].respondedAt": now,
+            changedBy: driverUserId,
+            note: `Driver rejected assignment: ${rejectionReason}`,
           },
-          $push: {
-            statusHistory: {
-              status: "pending",
-              changedBy: driverUserId,
-              note: `Driver rejected assignment: ${rejectionReason}`,
-            },
-          },
-        };
+        },
+      };
 
     const booking = await Booking.findOneAndUpdate(
       {
@@ -1180,8 +1249,8 @@ export const updateDriverBookingStatus = async (req, res) => {
   }
 };
 
-// CUSTOMER: Cancel only before a driver accepts and only when no payment has been taken.
-// The status/payment predicates make the operation atomic against driver acceptance or status updates.
+// CUSTOMER: Cancel only before a driver accepts and only when payment
+// has not been recorded as paid or is still in progress.
 export const cancelCustomerBooking = async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
@@ -1192,7 +1261,7 @@ export const cancelCustomerBooking = async (req, res) => {
     }
 
     const cancellationReason =
-      typeof req.body.cancellationReason === "string"
+      typeof req.body?.cancellationReason === "string"
         ? req.body.cancellationReason.trim().slice(0, 500)
         : "";
 
@@ -1213,7 +1282,8 @@ export const cancelCustomerBooking = async (req, res) => {
     if (!["pending", "assigned"].includes(existing.status)) {
       return res.status(409).json({
         success: false,
-        message: "This booking can only be cancelled before a driver accepts it. Please contact support if you need help with an accepted or in-progress delivery.",
+        message:
+          "This booking can only be cancelled before a driver accepts it. Please contact support if you need help with an accepted or in-progress delivery.",
         currentStatus: existing.status,
       });
     }
@@ -1221,7 +1291,8 @@ export const cancelCustomerBooking = async (req, res) => {
     if (!["unpaid", "failed"].includes(existing.paymentStatus)) {
       return res.status(409).json({
         success: false,
-        message: "This booking has a payment in progress or already recorded. Please contact support so payment can be checked safely.",
+        message:
+          "This booking has a payment in progress or already recorded. Please contact support so payment can be checked safely.",
         paymentStatus: existing.paymentStatus,
       });
     }
@@ -1257,12 +1328,11 @@ export const cancelCustomerBooking = async (req, res) => {
     if (!booking) {
       return res.status(409).json({
         success: false,
-        message: "This booking changed while you were cancelling it. Refresh the page and check the latest status.",
+        message:
+          "This booking changed while you were cancelling it. Refresh the page and check the latest status.",
       });
     }
 
-    // Stop worker retries and invalidate outstanding offers. The booking status is
-    // already terminal, so even a concurrent driver response cannot accept it.
     try {
       await Booking.updateOne(
         { _id: booking._id, status: "cancelled" },
@@ -1276,8 +1346,6 @@ export const cancelCustomerBooking = async (req, res) => {
         { runValidators: true }
       );
 
-      // Older records may not have a dispatch.offers array, so clean it only
-      // when the array exists to avoid a positional update against a missing path.
       await Booking.updateOne(
         {
           _id: booking._id,
@@ -1290,15 +1358,17 @@ export const cancelCustomerBooking = async (req, res) => {
             "dispatch.offers.$[offered].respondedAt": now,
           },
         },
-        { arrayFilters: [{ "offered.status": "offered" }] }
+        {
+          arrayFilters: [{ "offered.status": "offered" }],
+        }
       );
     } catch (cleanupError) {
-      // Cancellation itself is already persisted. Log cleanup failures for audit.
-      console.error("Could not clean up cancelled booking dispatch state:", cleanupError.message);
+      console.error(
+        "Could not clean up cancelled booking dispatch state:",
+        cleanupError.message
+      );
     }
 
-    // Manual admin assignments reserve a driver as busy. Release that reservation
-    // only if this booking was the one cancelled before acceptance.
     if (booking.driver) {
       try {
         await DriverProfile.updateOne(
@@ -1306,7 +1376,10 @@ export const cancelCustomerBooking = async (req, res) => {
           { $set: { availability: "online" } }
         );
       } catch (releaseError) {
-        console.error("Could not release driver after customer cancellation:", releaseError.message);
+        console.error(
+          "Could not release driver after customer cancellation:",
+          releaseError.message
+        );
       }
     }
 
@@ -1321,21 +1394,24 @@ export const cancelCustomerBooking = async (req, res) => {
     void notifyBookingStatusToCustomer(
       booking._id,
       "cancelled",
-      "Your booking was cancelled before driver acceptance. No payment was taken through this booking flow."
+      "Your booking was cancelled before driver acceptance."
     );
 
     let updatedBooking = booking;
+
     try {
-      updatedBooking = (await Booking.findById(booking._id)
-        .populate("vehicle", "name slug capacityKg")
-        .populate("customer", "name email phone")
-        .populate("driver", "name phone")
-        .populate("statusHistory.changedBy", "name role")
-        .lean()) || booking;
+      updatedBooking =
+        (await Booking.findById(booking._id)
+          .populate("vehicle", "name slug capacityKg")
+          .populate("customer", "name email phone")
+          .populate("driver", "name phone")
+          .populate("statusHistory.changedBy", "name role")
+          .lean()) || booking;
     } catch (enrichmentError) {
-      // The cancellation is already committed. A read/populate problem must not
-      // report the successful mutation as a failed cancellation.
-      console.error("Could not enrich cancellation response:", enrichmentError.message);
+      console.error(
+        "Could not enrich cancellation response:",
+        enrichmentError.message
+      );
     }
 
     return res.status(200).json({
@@ -1348,12 +1424,12 @@ export const cancelCustomerBooking = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Unable to cancel this booking right now. Refresh the page and try again.",
+      message:
+        "Unable to cancel this booking right now. Refresh the page and try again.",
     });
   }
 };
-
-// CUSTOMER, assigned DRIVER or ADMIN: Authorized booking details.
+// CUSTOMER / ASSIGNED DRIVER / ADMIN: Authorized booking details.
 export const getBookingById = async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
@@ -1367,7 +1443,6 @@ export const getBookingById = async (req, res) => {
       .populate("vehicle", "name slug capacityKg")
       .populate("customer", "name email phone")
       .populate("driver", "name phone")
-      .populate("statusHistory.changedBy", "name role")
       .lean();
 
     if (!booking) {
@@ -1377,11 +1452,39 @@ export const getBookingById = async (req, res) => {
       });
     }
 
-    const userId = req.user.userId;
-    const isAdmin = req.user.role === "admin";
-    const isCustomer = booking.customer?._id?.toString() === userId;
-    const isAssignedDriver = booking.driver?._id?.toString() === userId;
+    // Support the ID formats that may be present in the auth payload.
+    const authenticatedUserId = String(
+      req.user?.userId ??
+      req.user?.id ??
+      req.user?._id ??
+      ""
+    );
 
+    const getReferenceId = (value) => {
+      if (value == null) return "";
+
+      if (typeof value === "object") {
+        return String(value._id ?? value.id ?? value);
+      }
+
+      return String(value);
+    };
+
+    const customerId = getReferenceId(booking.customer);
+    const driverId = getReferenceId(booking.driver);
+    const role = String(req.user?.role ?? "")
+      .trim()
+      .toLowerCase();
+
+    const isAdmin = role === "admin";
+    const isCustomer =
+      authenticatedUserId !== "" &&
+      customerId === authenticatedUserId;
+    const isAssignedDriver =
+      authenticatedUserId !== "" &&
+      driverId === authenticatedUserId;
+
+    // Keep the ownership restriction; never expose another customer's booking.
     if (!isAdmin && !isCustomer && !isAssignedDriver) {
       return res.status(403).json({
         success: false,

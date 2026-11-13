@@ -33,6 +33,24 @@ import {
 
 const router = express.Router();
 
+// Slow down credential-stuffing and scripted account-creation attempts.
+// Keep this separate from recovery limits so normal authenticated API polling
+// is not affected by authentication-specific controls.
+const credentialAttemptLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: {
+    success: false,
+    code: "AUTH_RATE_LIMITED",
+    message: "Too many sign-in or registration attempts. Please wait 15 minutes and try again.",
+  },
+  handler: (req, res, _next, options) => {
+    res.status(options.statusCode).json(options.message);
+  },
+});
+
 const passwordRecoveryLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
@@ -44,8 +62,8 @@ const passwordRecoveryLimiter = rateLimit({
   },
 });
 
-router.post("/register", validate(registerSchema), register);
-router.post("/login", validate(loginSchema), login);
+router.post("/register", credentialAttemptLimiter, validate(registerSchema), register);
+router.post("/login", credentialAttemptLimiter, validate(loginSchema), login);
 
 router.post(
   "/forgot-password",

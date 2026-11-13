@@ -1,4 +1,3 @@
-
 import { z } from "zod";
 
 const bookingStatuses = [
@@ -43,15 +42,17 @@ export const createBookingSchema = z.object({
     .min(2)
     .max(300),
 
+  paymentMethod: z
+    .enum(["cash_on_delivery", "online"])
+    .optional()
+    .default("cash_on_delivery"),
+
   specialInstructions: z
     .string()
     .trim()
     .max(500)
     .optional()
     .default(""),
-
-  pickupLocationToken: z.string().max(4096).optional(),
-  dropLocationToken: z.string().max(4096).optional(),
 });
 
 export const assignDriverSchema = z.object({
@@ -63,6 +64,7 @@ export const assignDriverSchema = z.object({
 export const driverResponseSchema = z
   .object({
     action: z.enum(["accept", "reject"]),
+
     rejectionReason: z
       .string()
       .trim()

@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import DriverProfile from "../models/DriverProfile.js";
+import User from "../models/User.js";
 import DriverActivity from "../models/DriverActivity.js";
 import Vehicle from "../models/Vehicle.js";
 import DriverMediaAsset from "../models/DriverMediaAsset.js";
@@ -202,7 +203,31 @@ export const submitDriverProfile = async (req, res) => {
       return res.status(409).json({
         success: false,
         message:
-          "A driver profile already exists. Use PATCH /drivers/profile to update it directly.",
+          "A driver profile already exists. Use the driver verification page to review its approval status.",
+      });
+    }
+
+    // Enforce onboarding prerequisites on the server as well as in the UI.
+    // Personal details are saved through PATCH /auth/profile and the photo is
+    // stored through POST /drivers/profile/photo before this endpoint is called.
+    const account = await User.findOne({
+      _id: req.user.userId,
+      role: "driver",
+      isActive: true,
+    }).select("name phone profileImage");
+
+    if (
+      !account ||
+      !account.profileImage ||
+      typeof account.name !== "string" ||
+      account.name.trim().length < 2 ||
+      !/^\+?[1-9]\d{6,14}$/.test(String(account.phone || "").trim())
+    ) {
+      return res.status(422).json({
+        success: false,
+        code: "DRIVER_ONBOARDING_PERSONAL_DETAILS_INCOMPLETE",
+        message:
+          "Save your full name, valid phone number and driver profile photo before submitting onboarding.",
       });
     }
 

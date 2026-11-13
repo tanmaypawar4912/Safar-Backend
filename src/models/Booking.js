@@ -175,7 +175,7 @@ const dispatchSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["searching", "offering", "accepted", "exhausted", "cancelled"],
+      enum: ["searching", "offering", "accepted", "exhausted"],
       default: "searching",
       index: true,
     },
@@ -255,6 +255,19 @@ const bookingSchema = new mongoose.Schema(
       ],
       default: "pending",
       index: true,
+    },
+
+    paymentMethod: { type: String, enum: ["cash_on_delivery", "online"], default: "cash_on_delivery" },
+
+    payment: {
+      gatewayOrderId: { type: String, default: null },
+      gatewayPaymentId: { type: String, default: null },
+      amount: { type: Number, default: null, min: 0 },
+      currency: { type: String, default: "INR", enum: ["INR"] },
+      signatureVerified: { type: Boolean, default: false },
+      initiatedAt: { type: Date, default: null },
+      paidAt: { type: Date, default: null },
+      cashCollectedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     },
 
     paymentStatus: {
