@@ -4,6 +4,7 @@ import { createHash, randomBytes } from "crypto";
 import User from "../models/User.js";
 import RefreshToken from "../models/RefreshToken.js";
 import PasswordResetToken from "../models/PasswordResetToken.js";
+import { consumeRefreshTokenOnce } from "../utils/refreshTokenService.js";
 
 import {
   generateAccessToken,
@@ -165,23 +166,18 @@ export const refreshAccessToken = async (req, res) => {
     const decoded = verifyRefreshToken(oldRefreshToken);
     const tokenHash = hashToken(oldRefreshToken);
 
-    const storedToken = await RefreshToken.findOne({
+    // Consume the refresh token atomically. This prevents two concurrent
+    // refresh requests from both rotating the same token successfully.
+    const consumedToken = await consumeRefreshTokenOnce(RefreshToken, {
       userId: decoded.userId,
       tokenHash,
-      revokedAt: null,
+      now: new Date(),
     });
 
-    if (!storedToken) {
+    if (!consumedToken) {
       return res.status(401).json({
         success: false,
-        message: "Invalid refresh token",
-      });
-    }
-
-    if (storedToken.expiresAt <= new Date()) {
-      return res.status(401).json({
-        success: false,
-        message: "Refresh token expired",
+        message: "Invalid, expired, or already-used refresh token",
       });
     }
 
@@ -194,10 +190,7 @@ export const refreshAccessToken = async (req, res) => {
       });
     }
 
-    // Rotate refresh token.
-    storedToken.revokedAt = new Date();
-    await storedToken.save();
-
+    // The previous refresh token is already consumed atomically above.
     await createSession(user, res);
 
     return res.status(200).json({

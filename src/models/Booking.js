@@ -106,6 +106,55 @@ const fareSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const commissionSnapshotSchema = new mongoose.Schema(
+  {
+    ruleId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "VehicleCommissionRule",
+      required: true,
+    },
+    vehicleName: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 80,
+    },
+    // Basis points are immutable for this booking after creation.
+    // 1000 basis points = 10.00%.
+    commissionRateBps: {
+      type: Number,
+      required: true,
+      min: 0,
+      max: 5000,
+      validate: {
+        validator: Number.isInteger,
+        message: "Commission rate must use whole basis points.",
+      },
+    },
+    ruleUpdatedAt: { type: Date, default: null },
+    capturedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
+const financialSnapshotSchema = new mongoose.Schema(
+  {
+    calculationStatus: {
+      type: String,
+      enum: ["finalized", "legacy", "review_required"],
+      required: true,
+    },
+    currency: { type: String, enum: ["INR"], default: "INR" },
+    commissionBasePaise: { type: Number, min: 0, default: null },
+    commissionRateBps: { type: Number, min: 0, max: 5000, default: null },
+    platformCommissionPaise: { type: Number, min: 0, default: null },
+    driverEarningPaise: { type: Number, min: 0, default: null },
+    calculatedAt: { type: Date, default: Date.now },
+    reviewReason: { type: String, default: "", maxlength: 200 },
+  },
+  { _id: false }
+);
+
 const statusHistorySchema = new mongoose.Schema(
   {
     status: {
@@ -175,7 +224,7 @@ const dispatchSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["searching", "offering", "accepted", "exhausted"],
+      enum: ["searching", "offering", "accepted", "exhausted", "cancelled"],
       default: "searching",
       index: true,
     },
@@ -237,6 +286,20 @@ const bookingSchema = new mongoose.Schema(
     fare: {
       type: fareSchema,
       required: true,
+    },
+
+    // Captured when the customer creates the booking. Later admin rule changes
+    // must never alter the commission agreed for this booking.
+    commissionSnapshot: {
+      type: commissionSnapshotSchema,
+      default: undefined,
+    },
+
+    // Finalized exactly once when the driver marks the booking delivered.
+    // Older bookings without commissionSnapshot are marked legacy, not backfilled.
+    financialSnapshot: {
+      type: financialSnapshotSchema,
+      default: undefined,
     },
 
     status: {

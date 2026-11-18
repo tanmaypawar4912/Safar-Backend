@@ -39,6 +39,7 @@ import { protect } from "../middleware/authMiddleware.js";
 import { authorizeRoles } from "../middleware/roleMiddleware.js";
 import { validate } from "../middleware/validateMiddleware.js";
 import { validateDriverPhotoOwnership } from "../middleware/validateDriverPhotoOwnership.js";
+import { validateImageSignature } from "../middleware/validateImageSignature.js";
 
 import {
   driverProfileSchema,
@@ -88,6 +89,7 @@ router.post(
   protect,
   authorizeRoles("driver"),
   upload.single("file"),
+  validateImageSignature,
   uploadDriverMedia
 );
 
@@ -114,6 +116,7 @@ router.post(
   protect,
   authorizeRoles("driver"),
   upload.single("file"),
+  validateImageSignature,
   uploadDriverProfilePhoto
 );
 

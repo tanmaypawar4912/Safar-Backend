@@ -12,9 +12,9 @@ import {
 const OFFER_TTL_MS = 2 * 60 * 1000;
 const RETRY_DELAY_MS = 30 * 1000;
 const LOCK_TTL_MS = 2 * 60 * 1000;
-// Send each booking offer to one eligible driver at a time. A new offer is
-// created only after the current offer is rejected or expires.
-const OFFER_BATCH_SIZE = 1;
+// Broadcast each booking to every currently eligible online driver. The
+// conditional booking claim in respondToBooking is the single-winner lock:
+// only the first valid acceptance can assign the booking.
 const DRIVER_REOFFER_COOLDOWN_MS = 5 * 60 * 1000;
 const SWEEP_BATCH_SIZE = 50;
 const ACTIVE_ASSET_STATUSES = ["uploaded", "linked"];
@@ -324,7 +324,6 @@ async function getMatchingAvailableProfiles(booking) {
   })
     .populate({ path: "user", select: "name email phone role isActive" })
     .sort({ updatedAt: 1 })
-    .limit(200)
     .lean();
 
   const candidates = profiles.filter((profile) => {
@@ -348,9 +347,7 @@ async function getMatchingAvailableProfiles(booking) {
   // Check approved documents and all four owned photos before sending an offer.
   const eligibility = await profilesAreDispatchEligible(candidates);
 
-  return candidates
-    .filter((_profile, index) => eligibility[index])
-    .slice(0, OFFER_BATCH_SIZE);
+  return candidates.filter((_profile, index) => eligibility[index]);
 }
 
 async function logDispatchActivity({
@@ -716,5 +713,5 @@ export function startDispatchWorker() {
 
 export const dispatchConfig = {
   offerTtlMs: OFFER_TTL_MS,
-  batchSize: OFFER_BATCH_SIZE,
+  mode: "broadcast",
 };

@@ -15,6 +15,9 @@ import driverRoutes from "./routes/driverRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
 import complaintRoutes from "./routes/complaintRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
+import commissionRoutes from "./routes/commissionRoutes.js";
+import financialLedgerRoutes from "./routes/financialLedgerRoutes.js";
+import driverSettlementRoutes from "./routes/driverSettlementRoutes.js";
 import enterpriseRoutes from "./routes/enterpriseRoutes.js";
 
 const app = express();
@@ -97,6 +100,9 @@ app.use("/api/drivers", driverRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/complaints", complaintRoutes);
 app.use("/api/payments", paymentRoutes);
+app.use("/api/commission-rules", commissionRoutes);
+app.use("/api/financial-ledger", financialLedgerRoutes);
+app.use("/api/settlements", driverSettlementRoutes);
 app.use("/api/enterprise", enterpriseRoutes);
 
 app.use((req, res) => {

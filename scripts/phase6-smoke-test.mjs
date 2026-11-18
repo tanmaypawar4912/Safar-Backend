@@ -67,6 +67,62 @@ const checks = [
     validate: (body) => body?.success === false,
     detail: "Unauthenticated requests must not read enterprise enquiries.",
   },
+  {
+    name: "Driver financial ledger is protected",
+    path: "/financial-ledger/driver/entries",
+    expectedStatus: 401,
+    validate: (body) => body?.success === false,
+    detail: "Unauthenticated requests must not read driver financial records.",
+  },
+  {
+    name: "Driver financial ledger summary is protected",
+    path: "/financial-ledger/driver/summary",
+    expectedStatus: 401,
+    validate: (body) => body?.success === false,
+    detail: "Unauthenticated requests must not read driver financial summaries.",
+  },
+  {
+    name: "Admin financial ledger is protected",
+    path: "/financial-ledger/admin/entries",
+    expectedStatus: 401,
+    validate: (body) => body?.success === false,
+    detail: "Unauthenticated requests must not read admin financial records.",
+  },
+  {
+    name: "Admin financial ledger summary is protected",
+    path: "/financial-ledger/admin/summary",
+    expectedStatus: 401,
+    validate: (body) => body?.success === false,
+    detail: "Unauthenticated requests must not read the financial summary.",
+  },
+  {
+    name: "Driver settlements are protected",
+    path: "/settlements/driver",
+    expectedStatus: 401,
+    validate: (body) => body?.success === false,
+    detail: "Unauthenticated requests must not read driver settlements.",
+  },
+  {
+    name: "Driver settlement summary is protected",
+    path: "/settlements/driver/summary",
+    expectedStatus: 401,
+    validate: (body) => body?.success === false,
+    detail: "Unauthenticated requests must not read driver settlement summaries.",
+  },
+  {
+    name: "Admin settlements are protected",
+    path: "/settlements/admin",
+    expectedStatus: 401,
+    validate: (body) => body?.success === false,
+    detail: "Unauthenticated requests must not read admin settlements.",
+  },
+  {
+    name: "Admin settlement summary is protected",
+    path: "/settlements/admin/summary",
+    expectedStatus: 401,
+    validate: (body) => body?.success === false,
+    detail: "Unauthenticated requests must not read admin settlement summaries.",
+  },
 ];
 
 async function request(path, init = {}) {
@@ -134,6 +190,18 @@ const negativeChecks = [
     name: "Location retrieve rejects an invalid search session",
     path: "/pricing/locations/retrieve?mapboxId=poi.test&city=pune&sessionToken=invalid",
     expectedStatus: 400,
+  },
+  {
+    name: "Settlement generation requires admin authentication",
+    path: "/settlements/admin/generate",
+    init: { method: "POST", body: JSON.stringify({ date: "2026-11-16" }) },
+    expectedStatus: 401,
+  },
+  {
+    name: "Settlement payout confirmation requires admin authentication",
+    path: "/settlements/admin/507f1f77bcf86cd799439011/confirm",
+    init: { method: "PATCH", body: JSON.stringify({ payoutMethod: "upi", payoutReference: "TEST12345" }) },
+    expectedStatus: 401,
   },
 ];
 

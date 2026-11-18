@@ -1,5 +1,8 @@
 import Vehicle from "../models/Vehicle.js";
 import PricingRule from "../models/PricingRule.js";
+import VehicleCommissionRule, {
+  DEFAULT_COMMISSION_RATE_BPS,
+} from "../models/VehicleCommissionRule.js";
 import DriverProfile from "../models/DriverProfile.js";
 import { profilesAreDispatchEligible } from "../services/dispatchService.js";
 
@@ -49,6 +52,15 @@ export const createVehicle = async (req, res) => {
     if (!slug) return res.status(400).json({ success: false, message: "A valid vehicle slug is required." });
     const vehicle = await Vehicle.create({ name, slug, description: String(req.body.description || "").trim().slice(0, 500), capacityKg: number(req.body.capacityKg, "Capacity", 1), imageUrl: safeImageUrl(req.body.imageUrl), features: Array.isArray(req.body.features) ? req.body.features.map(String).map((x) => x.trim()).filter(Boolean).slice(0, 20) : [], isActive: req.body.isActive !== false, sortOrder: number(req.body.sortOrder ?? 0, "Sort order") });
     const pricing = await PricingRule.create({ vehicle: vehicle._id, baseFare: number(req.body.pricing?.baseFare, "Base fare"), perKmRate: number(req.body.pricing?.perKmRate, "Per-km rate"), perKgRate: number(req.body.pricing?.perKgRate, "Per-kg rate"), minimumFare: number(req.body.pricing?.minimumFare, "Minimum fare"), serviceFee: number(req.body.pricing?.serviceFee ?? 0, "Service fee"), isActive: vehicle.isActive });
+    try {
+      await VehicleCommissionRule.updateOne(
+        { vehicle: vehicle._id },
+        { $setOnInsert: { vehicle: vehicle._id, commissionRateBps: DEFAULT_COMMISSION_RATE_BPS } },
+        { upsert: true, setDefaultsOnInsert: true }
+      );
+    } catch (commissionError) {
+      console.error("Default commission rule could not be initialized:", commissionError.message);
+    }
     return res.status(201).json({ success: true, message: "Vehicle and pricing created.", vehicle: { ...vehicle.toObject(), pricing: pricing.toObject() } });
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ success: false, message: "A vehicle with this name/slug already exists." });
@@ -70,6 +82,17 @@ export const updateVehicle = async (req, res) => {
     if (b.isActive !== undefined) vehicle.isActive = Boolean(b.isActive);
     if (b.sortOrder !== undefined) vehicle.sortOrder = number(b.sortOrder, "Sort order");
     await vehicle.save();
+    if (vehicle.isActive) {
+      try {
+        await VehicleCommissionRule.updateOne(
+          { vehicle: vehicle._id },
+          { $setOnInsert: { vehicle: vehicle._id, commissionRateBps: DEFAULT_COMMISSION_RATE_BPS } },
+          { upsert: true, setDefaultsOnInsert: true }
+        );
+      } catch (commissionError) {
+        console.error("Default commission rule could not be initialized:", commissionError.message);
+      }
+    }
     let pricing = await PricingRule.findOne({ vehicle: vehicle._id });
     if (b.pricing) {
       const p = b.pricing;

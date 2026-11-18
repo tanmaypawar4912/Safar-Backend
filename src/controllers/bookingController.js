@@ -5,8 +5,11 @@ import Booking from "../models/Booking.js";
 import OperationalSetting from "../models/OperationalSetting.js";
 import DriverProfile from "../models/DriverProfile.js";
 import DriverActivity from "../models/DriverActivity.js";
+import VehicleCommissionRule from "../models/VehicleCommissionRule.js";
 
 import { calculateFareEstimate } from "../services/fareService.js";
+import { calculateCommissionAmounts } from "../services/commissionCalculationService.js";
+import { recordDeliveryLedgerEntries, reconcileBookingLedger } from "../services/financialLedgerService.js";
 
 import {
   dispatchBooking,
@@ -45,6 +48,51 @@ function createHttpError(message, statusCode) {
   const error = new Error(message);
   error.statusCode = statusCode;
   return error;
+}
+
+function buildDeliveryFinancialSnapshot(booking, calculatedAt = new Date()) {
+  const commissionRateBps = booking.commissionSnapshot?.commissionRateBps;
+
+  // Bookings created before Sprint 2 deliberately remain historical/legacy.
+  if (!Number.isInteger(commissionRateBps)) {
+    return {
+      calculationStatus: "legacy",
+      currency: "INR",
+      calculatedAt,
+      reviewReason: "Booking predates vehicle commission snapshots.",
+    };
+  }
+
+  const payableAmount = booking.fare?.finalFare ?? booking.fare?.estimatedFare;
+
+  try {
+    const amounts = calculateCommissionAmounts({
+      amountRupees: payableAmount,
+      commissionRateBps,
+    });
+
+    return {
+      calculationStatus: "finalized",
+      currency: "INR",
+      ...amounts,
+      calculatedAt,
+    };
+  } catch (error) {
+    // Do not prevent a real delivery from being completed because a financial
+    // snapshot needs investigation. Mark it clearly so settlement excludes it.
+    console.error(
+      `Commission calculation requires review for booking ${booking.bookingCode || booking._id}:`,
+      error.message
+    );
+
+    return {
+      calculationStatus: "review_required",
+      currency: "INR",
+      commissionRateBps,
+      calculatedAt,
+      reviewReason: "Invalid booking amount or commission snapshot; admin review required.",
+    };
+  }
 }
 
 function generateBookingCode() {
@@ -133,6 +181,27 @@ export const createBooking = async (req, res) => {
       }
     }
 
+    // Freeze the vehicle commission rule for this booking. A missing rule is
+    // treated as a configuration problem rather than silently using a rate
+    // that may differ from the administrator's intended vehicle policy.
+    const commissionRule = await VehicleCommissionRule.findOne({
+      vehicle: estimate.vehicle.id,
+    })
+      .select("_id commissionRateBps updatedAt")
+      .lean();
+
+    if (
+      !commissionRule ||
+      !Number.isInteger(commissionRule.commissionRateBps) ||
+      commissionRule.commissionRateBps < 0 ||
+      commissionRule.commissionRateBps > 5000
+    ) {
+      throw createHttpError(
+        "Commission settings are not configured for this vehicle. Please contact support before placing the booking.",
+        503
+      );
+    }
+
     const booking = await Booking.create({
       bookingCode: generateBookingCode(),
       customer: req.user.userId,
@@ -155,6 +224,13 @@ export const createBooking = async (req, res) => {
       },
 
       fare: estimate.fare,
+      commissionSnapshot: {
+        ruleId: commissionRule._id,
+        vehicleName: estimate.vehicle.name,
+        commissionRateBps: commissionRule.commissionRateBps,
+        ruleUpdatedAt: commissionRule.updatedAt || null,
+        capturedAt: new Date(),
+      },
       status: "pending",
 
       paymentMethod,
@@ -186,6 +262,7 @@ export const createBooking = async (req, res) => {
         weightKg: booking.package.weightKg,
         estimatedFare: booking.fare.estimatedFare,
         paymentMethod,
+        commissionRateBps: commissionRule.commissionRateBps,
       },
     });
 
@@ -1149,13 +1226,28 @@ export const updateDriverBookingStatus = async (req, res) => {
       _id: req.params.id,
       driver: req.user.userId,
     })
-      .select("_id status")
+      .select("_id bookingCode status customer driver vehicle paymentMethod paymentStatus payment fare.finalFare fare.estimatedFare commissionSnapshot financialSnapshot updatedAt createdAt")
       .lean();
 
     if (!currentBooking) {
       return res.status(404).json({
         success: false,
         message: "Assigned booking not found",
+      });
+    }
+
+    // A retry after the booking was already marked delivered can safely repair
+    // any ledger rows that may have failed during the original request.
+    if (currentBooking.status === "delivered" && req.body.status === "delivered") {
+      const reconciliation = await reconcileBookingLedger(
+        currentBooking,
+        req.user.userId
+      );
+      return res.status(200).json({
+        success: true,
+        alreadyDelivered: true,
+        message: "Delivery is already complete. Financial ledger is synchronized.",
+        financialLedger: reconciliation,
       });
     }
 
@@ -1172,22 +1264,34 @@ export const updateDriverBookingStatus = async (req, res) => {
       });
     }
 
-    const booking = await Booking.findOneAndUpdate(
-      {
-        _id: req.params.id,
-        driver: req.user.userId,
-        status: currentBooking.status,
-      },
-      {
-        $set: { status: expectedNext },
-        $push: {
+    const statusUpdate = {
+      $set: { status: expectedNext },
+      $push: {
           statusHistory: {
             status: expectedNext,
             changedBy: req.user.userId,
             note: `Driver updated delivery status to ${expectedNext}`,
           },
         },
+    };
+
+    if (
+      expectedNext === "delivered" &&
+      !currentBooking.financialSnapshot
+    ) {
+      statusUpdate.$set.financialSnapshot = buildDeliveryFinancialSnapshot(
+        currentBooking,
+        new Date()
+      );
+    }
+
+    const booking = await Booking.findOneAndUpdate(
+      {
+        _id: req.params.id,
+        driver: req.user.userId,
+        status: currentBooking.status,
       },
+      statusUpdate,
       { returnDocument: "after", runValidators: true }
     ).lean();
 
@@ -1198,11 +1302,28 @@ export const updateDriverBookingStatus = async (req, res) => {
       });
     }
 
+    let financialLedger = { status: "not_applicable" };
     if (expectedNext === "delivered") {
       await DriverProfile.updateOne(
         { user: req.user.userId, availability: "busy" },
         { $set: { availability: "online" } }
       );
+
+      try {
+        financialLedger = await recordDeliveryLedgerEntries(
+          booking,
+          req.user.userId
+        );
+      } catch (ledgerError) {
+        // Delivery completion must not be rolled back because a secondary
+        // ledger write failed. The driver's delivered-status retry or the
+        // admin reconciliation endpoint can safely complete missing rows.
+        financialLedger = { status: "pending_reconciliation" };
+        console.error(
+          `Financial ledger sync pending for ${booking.bookingCode || booking._id}:`,
+          ledgerError.message
+        );
+      }
     }
 
     const driverProfile = await DriverProfile.findOne({
@@ -1238,6 +1359,7 @@ export const updateDriverBookingStatus = async (req, res) => {
       success: true,
       message: `Delivery status updated to ${expectedNext}`,
       booking,
+      ...(expectedNext === "delivered" ? { financialLedger } : {}),
     });
   } catch (error) {
     console.error("Update delivery status error:", error.message);
