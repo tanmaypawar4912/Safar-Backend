@@ -263,7 +263,7 @@ export const getDriverFinancialLedgerSummary = async (req, res) => {
         driverEarningsAwaitingCustomerPaymentRupees: awaitingCustomerPaymentPaise / 100,
         estimatedNetSettlementPaise,
         estimatedNetSettlementRupees: estimatedNetSettlementPaise / 100,
-        note: "Only online bookings with a captured customer payment are included as payout-eligible. Daily settlement batches and payout confirmations are implemented in the next sprint.",
+        note: "COD driver earnings are already retained in cash. Online earnings become payout-eligible only after customer payment capture. Admin generates daily IST settlement batches and confirms payouts only after the actual bank or UPI transfer.",
       },
     });
   } catch (error) {

@@ -13,7 +13,8 @@
     "seed:commission": "node src/scripts/seedCommissionRules.js",
     "test:ledger": "node --test src/scripts/financialLedger.test.js",
     "test:settlements": "node --test src/scripts/driverSettlement.test.js",
-    "test:commission": "node --test src/scripts/commissionCalculation.test.js"
+    "test:commission": "node --test src/scripts/commissionCalculation.test.js",
+    "test:unit": "node --test src/scripts/adminDriverFinancialSummary.test.js src/scripts/bookingValidator.test.js src/scripts/commissionCalculation.test.js src/scripts/driverSettlement.test.js src/scripts/driverSettlementIndex.test.js src/scripts/financialLedger.test.js src/scripts/imageSignature.test.js src/scripts/refreshTokenService.test.js src/scripts/runtimeSecurity.test.js src/scripts/trackingAccessPolicy.test.js src/scripts/requestOriginGuard.test.js"
   },
   "keywords": [
     "logistics",
@@ -44,5 +45,8 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
+  },
+  "engines": {
+    "node": ">=22.22.0"
   }
 }

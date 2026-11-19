@@ -54,6 +54,7 @@ export function attachTrackingSocket(httpServer, env) {
   const allowedOrigins = getAllowedOrigins(env);
 
   const io = new Server(httpServer, {
+    serveClient: true,
     cors: {
       origin(origin, callback) {
         if (!origin || allowedOrigins.has(origin)) {
