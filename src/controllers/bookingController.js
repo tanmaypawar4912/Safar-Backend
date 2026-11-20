@@ -9,13 +9,19 @@ import VehicleCommissionRule from "../models/VehicleCommissionRule.js";
 
 import { calculateFareEstimate } from "../services/fareService.js";
 import { calculateCommissionAmounts } from "../services/commissionCalculationService.js";
-import { recordDeliveryLedgerEntries, reconcileBookingLedger } from "../services/financialLedgerService.js";
+import { reconcileBookingLedger } from "../services/financialLedgerService.js";
 
 import {
   dispatchBooking,
+  wakeDispatchForAvailableDrivers,
   driverIsDispatchEligible,
   profilesAreDispatchEligible,
 } from "../services/dispatchService.js";
+
+import {
+  emitDriverDispatchOfferClosed,
+  emitDriverDispatchJobUpdated,
+} from "../services/dispatchRealtime.js";
 
 import {
   notifyAdminsNewBooking,
@@ -100,6 +106,101 @@ function generateBookingCode() {
   return `LG-${Date.now().toString(36).toUpperCase()}-${suffix}`;
 }
 
+/**
+ * Create the real booking only after the checkout controller has verified a
+ * captured Razorpay payment with the gateway. checkoutIntentId is unique on
+ * Booking so retries/replayed callbacks cannot create duplicate orders.
+ */
+export async function createBookingFromPaidCheckout(checkout, paymentDetails) {
+  const existing = await Booking.findOne({ checkoutIntentId: checkout._id });
+  if (existing) {
+    return { booking: existing, created: false };
+  }
+
+  const draft = checkout.bookingDraft;
+  const estimate = checkout.quoteSnapshot;
+  const now = new Date();
+  let booking;
+
+  try {
+    booking = await Booking.create({
+      checkoutIntentId: checkout._id,
+      bookingCode: generateBookingCode(),
+      customer: checkout.customer,
+      vehicle: estimate.vehicle.id,
+      pickup: estimate.route.pickup,
+      drop: estimate.route.drop,
+      package: {
+        description: draft.packageDescription,
+        weightKg: estimate.package.weightKg,
+        specialInstructions: draft.specialInstructions || "",
+      },
+      route: {
+        distanceMeters: estimate.route.distanceMeters,
+        distanceKm: estimate.route.distanceKm,
+        durationSeconds: estimate.route.durationSeconds,
+        durationMinutes: estimate.route.durationMinutes,
+      },
+      fare: estimate.fare,
+      commissionSnapshot: checkout.commissionSnapshot,
+      status: "pending",
+      paymentMethod: "online",
+      paymentStatus: "paid",
+      payment: {
+        gatewayOrderId: checkout.razorpayOrderId,
+        gatewayPaymentId: paymentDetails.paymentId,
+        amount: checkout.amountPaise / 100,
+        currency: "INR",
+        signatureVerified: true,
+        initiatedAt: checkout.createdAt || now,
+        paidAt: paymentDetails.paidAt || now,
+      },
+      dispatch: { mode: "automatic", status: "searching", offers: [] },
+      statusHistory: [{
+        status: "pending",
+        changedBy: checkout.customer,
+        note: "Booking placed after successful online payment verification.",
+        createdAt: now,
+      }],
+    });
+  } catch (error) {
+    if (error?.code === 11000) {
+      const duplicate = await Booking.findOne({ checkoutIntentId: checkout._id });
+      if (duplicate) return { booking: duplicate, created: false };
+    }
+    throw error;
+  }
+
+  void logBookingActivity({
+    actor: checkout.customer,
+    booking,
+    action: "booking_created_after_online_payment",
+    message: `Customer placed booking ${booking.bookingCode} after verified online payment`,
+    metadata: {
+      paymentMethod: "online",
+      paymentStatus: "paid",
+      gatewayOrderId: checkout.razorpayOrderId,
+      gatewayPaymentId: paymentDetails.paymentId,
+      amountPaise: checkout.amountPaise,
+      commissionRateBps: checkout.commissionSnapshot.commissionRateBps,
+    },
+  });
+
+  void notifyAdminsNewBooking(booking._id);
+  void notifyBookingStatusToCustomer(
+    booking._id,
+    "pending",
+    "Your online payment was verified and your booking has been placed. Automatic driver dispatch has started."
+  );
+  void dispatchBooking(booking._id);
+
+  const populated = await Booking.findById(booking._id)
+    .populate("vehicle", "name slug capacityKg")
+    .lean();
+
+  return { booking: populated || booking.toObject(), created: true };
+}
+
 async function logDriverActivity({
   driver,
   driverProfile = null,
@@ -161,6 +262,13 @@ export const createBooking = async (req, res) => {
       req.body.paymentMethod === "online"
         ? "online"
         : "cash_on_delivery";
+
+    if (paymentMethod === "online") {
+      throw createHttpError(
+        "Online bookings must be paid and verified before the booking is placed. Use the secure online checkout.",
+        409
+      );
+    }
 
     if (paymentMethod === "cash_on_delivery") {
       const setting = await OperationalSetting.findOne({
@@ -502,7 +610,7 @@ export const assignDriver = async (req, res) => {
     const { driverUserId } = req.body;
 
     const bookingExists = await Booking.findById(req.params.id)
-      .select("_id status driver")
+      .select("_id status driver dispatch.offers")
       .lean();
 
     if (!bookingExists) {
@@ -633,6 +741,20 @@ export const assignDriver = async (req, res) => {
     }
 
     reservedDriverUserId = null;
+
+    const displacedOfferDriverIds = (bookingExists.dispatch?.offers || [])
+      .filter((offer) => offer.status === "offered")
+      .map((offer) => offer.driver);
+    emitDriverDispatchOfferClosed(
+      displacedOfferDriverIds,
+      assignedBooking,
+      "assigned_by_admin"
+    );
+    emitDriverDispatchJobUpdated(
+      [driverUserId],
+      assignedBooking,
+      "assigned_by_admin"
+    );
 
     let booking = assignedBooking;
 
@@ -1002,6 +1124,12 @@ export const respondToBooking = async (req, res) => {
           String(offer.driver) !== String(driverUserId)
       );
 
+      emitDriverDispatchOfferClosed(
+        competingOffers.map((offer) => offer.driver),
+        accepted,
+        "accepted_by_another_driver"
+      );
+
       try {
         await Booking.updateOne(
           { _id: accepted._id },
@@ -1307,13 +1435,16 @@ export const updateDriverBookingStatus = async (req, res) => {
 
     let financialLedger = { status: "not_applicable" };
     if (expectedNext === "delivered") {
-      await DriverProfile.updateOne(
+      const availabilityRelease = await DriverProfile.updateOne(
         { user: req.user.userId, availability: "busy" },
         { $set: { availability: "online" } }
       );
+      if (availabilityRelease.modifiedCount > 0) {
+        void wakeDispatchForAvailableDrivers();
+      }
 
       try {
-        financialLedger = await recordDeliveryLedgerEntries(
+        financialLedger = await reconcileBookingLedger(
           booking,
           req.user.userId
         );
@@ -1458,6 +1589,10 @@ export const cancelCustomerBooking = async (req, res) => {
       });
     }
 
+    const cancelledOfferDriverIds = (booking.dispatch?.offers || [])
+      .filter((offer) => offer.status === "offered")
+      .map((offer) => offer.driver);
+
     try {
       await Booking.updateOne(
         { _id: booking._id, status: "cancelled" },
@@ -1493,6 +1628,12 @@ export const cancelCustomerBooking = async (req, res) => {
         cleanupError.message
       );
     }
+
+    emitDriverDispatchOfferClosed(
+      cancelledOfferDriverIds,
+      booking,
+      "cancelled_by_customer"
+    );
 
     if (booking.driver) {
       try {

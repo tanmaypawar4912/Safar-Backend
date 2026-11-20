@@ -8,8 +8,17 @@ import {
   notifyAdminsDispatchExhausted,
   notifyBookingStatusToCustomer,
 } from "./bookingNotificationService.js";
+import {
+  buildDispatchCandidateFilter,
+  canReceiveDispatchOfferAgain,
+  isActiveDriverAccount,
+} from "./dispatchRules.js";
+import {
+  emitDriverDispatchOffers,
+  emitDriverDispatchOfferClosed,
+} from "./dispatchRealtime.js";
 
-const OFFER_TTL_MS = 2 * 60 * 1000;
+const OFFER_TTL_MS = 5 * 60 * 1000;
 const RETRY_DELAY_MS = 30 * 1000;
 const LOCK_TTL_MS = 2 * 60 * 1000;
 // Broadcast each booking to every currently eligible online driver. The
@@ -314,34 +323,25 @@ async function getMatchingAvailableProfiles(booking) {
     }
   }
 
-  const profiles = await DriverProfile.find({
-    approvalStatus: "approved",
-    availability: "online",
-    isActive: true,
-    licenseExpiry: { $gt: now },
-    vehicleType: vehicle.slug,
-    vehicleCapacityKg: { $gte: booking.package.weightKg },
-  })
+  const profiles = await DriverProfile.find(
+    buildDispatchCandidateFilter({
+      vehicleSlug: vehicle.slug,
+      weightKg: booking.package.weightKg,
+      now,
+    })
+  )
     .populate({ path: "user", select: "name email phone role isActive" })
     .sort({ updatedAt: 1 })
     .lean();
 
   const candidates = profiles.filter((profile) => {
-    if (!profile.user || profile.user.role !== "driver" || !profile.user.isActive) {
-      return false;
-    }
-
+    if (!isActiveDriverAccount(profile)) return false;
     const lastOffer = lastOfferByDriver.get(String(profile.user._id));
-    if (!lastOffer) return true;
-    if (lastOffer.status === "offered" || lastOffer.status === "accepted" || lastOffer.status === "lost") {
-      return false;
-    }
-
-    const lastResponseAt = new Date(
-      lastOffer.respondedAt || lastOffer.expiresAt || lastOffer.offeredAt || 0
-    ).getTime();
-    return !Number.isFinite(lastResponseAt) ||
-      now.getTime() - lastResponseAt >= DRIVER_REOFFER_COOLDOWN_MS;
+    return canReceiveDispatchOfferAgain(
+      lastOffer,
+      now,
+      DRIVER_REOFFER_COOLDOWN_MS
+    );
   });
 
   // Check approved documents and all four owned photos before sending an offer.
@@ -527,6 +527,11 @@ export async function dispatchBooking(bookingId) {
           })
         )
       );
+      emitDriverDispatchOfferClosed(
+        expiredOffers.map((offer) => offer.driver),
+        booking,
+        "expired"
+      );
     }
 
     const activeOffers = (booking.dispatch?.offers || []).filter(
@@ -534,9 +539,88 @@ export async function dispatchBooking(bookingId) {
     );
 
     if (activeOffers.length) {
+      // A driver may become eligible after the customer created the booking.
+      // Add newly eligible drivers immediately instead of waiting for the
+      // first batch of offers to expire. Existing recipients are excluded by
+      // getMatchingAvailableProfiles through their active offer records.
+      const newlyEligibleProfiles = await getMatchingAvailableProfiles(booking);
+      const expiresAt = new Date(now.getTime() + OFFER_TTL_MS);
+
+      if (newlyEligibleProfiles.length) {
+        const newOffers = newlyEligibleProfiles.map((profile) => ({
+          driver: profile.user._id,
+          status: "offered",
+          offeredAt: now,
+          expiresAt,
+          respondedAt: null,
+          rejectionReason: "",
+        }));
+
+        const earliestExpiry = activeOffers.reduce((earliest, offer) => {
+          const offerExpiry = new Date(offer.expiresAt);
+          return offerExpiry < earliest ? offerExpiry : earliest;
+        }, new Date(activeOffers[0].expiresAt));
+
+        const appended = await Booking.updateOne(
+          {
+            _id: bookingId,
+            status: "pending",
+            driver: null,
+            "dispatch.lockedAt": now,
+          },
+          {
+            $push: { "dispatch.offers": { $each: newOffers } },
+            $set: {
+              "dispatch.status": "offering",
+              "dispatch.lastAttemptAt": now,
+              "dispatch.nextAttemptAt": earliestExpiry,
+              "dispatch.lockedAt": null,
+            },
+            $inc: { "dispatch.attemptCount": 1 },
+          }
+        );
+        lockAcquired = false;
+
+        if (appended.modifiedCount !== 1) {
+          await Booking.updateOne(
+            { _id: bookingId, "dispatch.lockedAt": now },
+            { $set: { "dispatch.lockedAt": null } }
+          );
+          return { dispatched: false, reason: "booking_changed_before_offers" };
+        }
+
+        const driverIds = newlyEligibleProfiles.map((profile) => profile.user._id);
+        await Promise.all(
+          newlyEligibleProfiles.map((profile) =>
+            logDispatchActivity({
+              driver: profile.user._id,
+              driverProfile: profile._id,
+              booking,
+              action: "job_offer_sent",
+              message: `Automatic dispatch offer sent for booking ${booking.bookingCode}`,
+              metadata: { expiresAt, vehicleType: profile.vehicleType },
+            })
+          )
+        );
+
+        emitDriverDispatchOffers(driverIds, {
+          _id: booking._id,
+          bookingCode: booking.bookingCode,
+          expiresAt,
+        });
+        void notifyDriversOfBookingOffer(bookingId, driverIds, expiresAt);
+
+        return {
+          dispatched: true,
+          offersCreated: driverIds.length,
+          appendedToActiveBroadcast: true,
+          expiresAt,
+        };
+      }
+
       const earliestExpiry = activeOffers.reduce((earliest, offer) => {
-        const expiresAt = new Date(offer.expiresAt);
-        return expiresAt < earliest ? expiresAt : earliest;
+        const offerExpiry = new Date(offer.expiresAt);
+        return offerExpiry < earliest ? offerExpiry : earliest;
       }, new Date(activeOffers[0].expiresAt));
 
       const released = await Booking.updateOne(
@@ -653,7 +737,15 @@ export async function dispatchBooking(bookingId) {
       )
     );
 
-    // Notification delivery is best-effort: a mail failure must not erase offers.
+    // Real-time notification is best-effort; persisted offers plus REST polling
+    // remain the source of truth when a driver is offline or the socket is down.
+    emitDriverDispatchOffers(driverIds, {
+      _id: booking._id,
+      bookingCode: booking.bookingCode,
+      expiresAt,
+    });
+
+    // Email delivery is also best-effort and never controls offer persistence.
     void notifyDriversOfBookingOffer(bookingId, driverIds, expiresAt);
 
     return { dispatched: true, offersCreated: driverIds.length, expiresAt };
@@ -666,6 +758,32 @@ export async function dispatchBooking(bookingId) {
       ).catch(() => undefined);
     }
     return { dispatched: false, reason: "internal_error" };
+  }
+}
+
+/**
+ * When a driver comes online, wake pending bookings immediately. Without this
+ * nudge, an exhausted booking waits for the fixed retry delay even though a
+ * newly eligible driver is now available. Offering bookings are also nudged
+ * so the dispatcher can append newly-online drivers to an active broadcast.
+ */
+export async function wakeDispatchForAvailableDrivers() {
+  const now = new Date();
+  try {
+    await Booking.updateMany(
+      {
+        status: "pending",
+        driver: null,
+        $or: [
+          { "dispatch.status": { $in: ["searching", "offering", "exhausted"] } },
+          { "dispatch.status": { $exists: false } },
+        ],
+      },
+      { $set: { "dispatch.nextAttemptAt": now } }
+    );
+    await runDispatchSweep();
+  } catch (error) {
+    console.error("Could not wake automatic dispatch for newly online driver:", error.message);
   }
 }
 

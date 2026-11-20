@@ -198,3 +198,67 @@ test("idempotency keys remain stable across repeated ledger builds", () => {
     second.map((entry) => entry.idempotencyKey)
   );
 });
+
+
+test("upfront online payment is recognized with delivery ledger entries after delivery", () => {
+  const capturedBeforeDelivery = booking({
+    status: "in_transit",
+    paymentMethod: "online",
+    paymentStatus: "paid",
+    payment: {
+      gatewayOrderId: "order_test_1",
+      gatewayPaymentId: "pay_test_upfront",
+      signatureVerified: true,
+      paidAt: new Date("2026-11-20T08:00:00.000Z"),
+    },
+    financialSnapshot: undefined,
+  });
+
+  // No driver earnings/commission ledger is finalized until delivery completes.
+  assert.deepEqual(buildBookingLedgerEntries(capturedBeforeDelivery), []);
+
+  const delivered = {
+    ...capturedBeforeDelivery,
+    status: "delivered",
+    financialSnapshot: booking().financialSnapshot,
+  };
+  const entries = buildBookingLedgerEntries(delivered, { performedBy: "driver-123" });
+  assert.deepEqual(
+    entries.map((entry) => entry.entryType).sort(),
+    ["platform_commission_earned", "driver_earning_payable", "online_payment_received"].sort()
+  );
+  const receipt = entries.find((entry) => entry.entryType === "online_payment_received");
+  assert.equal(receipt.amountPaise, 100000);
+  assert.equal(receipt.sourceReference, "pay_test_upfront");
+  assert.equal(receipt.occurredAt.toISOString(), "2026-11-20T08:00:00.000Z");
+});
+
+test("COD delivery does not create cash-collection or commission-receivable entries until driver reports collection", () => {
+  const deliveredUncollected = booking({
+    paymentMethod: "cash_on_delivery",
+    paymentStatus: "unpaid",
+    payment: {},
+  });
+  const beforeCollection = buildBookingLedgerEntries(deliveredUncollected, { performedBy: "driver-123" });
+  assert.deepEqual(
+    beforeCollection.map((entry) => entry.entryType).sort(),
+    ["platform_commission_earned", "driver_earning_retained_cod"].sort()
+  );
+
+  const collected = {
+    ...deliveredUncollected,
+    paymentStatus: "paid",
+    payment: {
+      cashCollectedBy: "driver-123",
+      cashCollectedAt: new Date("2026-11-20T09:00:00.000Z"),
+      paidAt: new Date("2026-11-20T09:00:00.000Z"),
+    },
+  };
+  const afterCollection = buildBookingLedgerEntries(collected, { performedBy: "driver-123" });
+  assert.ok(afterCollection.some((entry) => entry.entryType === "cod_cash_collected_by_driver"));
+  assert.ok(afterCollection.some((entry) => entry.entryType === "cod_commission_receivable"));
+  assert.equal(
+    afterCollection.find((entry) => entry.entryType === "cod_commission_receivable")?.amountPaise,
+    10000
+  );
+});

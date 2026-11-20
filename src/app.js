@@ -65,6 +65,9 @@ app.use(createRequestOriginGuard(allowedOrigins));
 
 app.use(helmet());
 
+// Razorpay signs the exact webhook bytes. Mount the raw parser before the
+// global JSON parser so the webhook controller can verify the original body.
+app.use("/api/payments/webhook", express.raw({ type: "application/json", limit: "1mb" }));
 app.use(express.json({ limit: "1mb" }));
 
 app.use(
