@@ -8,6 +8,7 @@ import {
   driverIsDispatchEligible,
   getDriverDispatchEligibility,
   profilesAreDispatchEligible,
+  wakeDispatchForAvailableDrivers,
 } from "../services/dispatchService.js";
 
 const publicDriverFields = "name email phone role";
@@ -745,6 +746,12 @@ export const setDriverAvailability = async (req, res) => {
     const previous = profile.availability;
     profile.availability = req.body.availability;
     await profile.save();
+
+    // Make previously waiting/exhausted customer bookings visible to this
+    // driver immediately after they become eligible and go online.
+    if (profile.availability === "online" && previous !== "online") {
+      void wakeDispatchForAvailableDrivers();
+    }
 
     await logActivity({
       driver: req.user.userId,

@@ -330,8 +330,16 @@ const bookingSchema = new mongoose.Schema(
       signatureVerified: { type: Boolean, default: false },
       initiatedAt: { type: Date, default: null },
       paidAt: { type: Date, default: null },
+      cashCollectedAt: { type: Date, default: null },
       cashCollectedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+      cashCollectionVerifiedAt: { type: Date, default: null },
+      cashCollectionVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+      cashCollectionVerificationNote: { type: String, default: "", maxlength: 500 },
     },
+
+    // A booking created from an upfront online checkout is unique per checkout intent.
+    // Sparse index keeps legacy/COD bookings unaffected.
+    checkoutIntentId: { type: mongoose.Schema.Types.ObjectId, ref: "BookingCheckout", default: undefined },
 
     paymentStatus: {
       type: String,
@@ -377,6 +385,7 @@ bookingSchema.index({ customer: 1, createdAt: -1 });
 bookingSchema.index({ driver: 1, status: 1, createdAt: -1 });
 bookingSchema.index({ status: 1, driver: 1, "dispatch.status": 1, "dispatch.nextAttemptAt": 1 });
 bookingSchema.index({ "dispatch.offers.driver": 1, "dispatch.offers.status": 1, status: 1 });
+bookingSchema.index({ checkoutIntentId: 1 }, { unique: true, sparse: true });
 
 const Booking = mongoose.model("Booking", bookingSchema);
 

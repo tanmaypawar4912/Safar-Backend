@@ -7,6 +7,7 @@ import {
   isBookingTrackable,
 } from "./trackingAccessPolicy.js";
 import { registerTrackingSocketServer } from "./trackingRealtime.js";
+import { registerDispatchSocketServer } from "./dispatchRealtime.js";
 
 const MAX_TRACKING_ROOMS_PER_SOCKET = 20;
 
@@ -121,8 +122,17 @@ export function attachTrackingSocket(httpServer, env) {
     }
   });
 
+  registerDispatchSocketServer(io);
+
   io.on("connection", (socket) => {
     const joinedRooms = new Set();
+
+    // Driver dispatch events are sent only to this server-verified private room.
+    // The room name is derived from the authenticated socket identity, never
+    // from a client-supplied driver ID.
+    if (socket.data.user.role === "driver") {
+      void socket.join(`driver:${socket.data.user.userId}`);
+    }
 
     socket.on("tracking:subscribe", async (payload = {}, callback) => {
       try {
