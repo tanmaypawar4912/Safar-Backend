@@ -1,44 +1,27 @@
-/** Recursively run Node's parser check over backend JavaScript modules. */
-import fs from "node:fs";
-import path from "node:path";
+import { readdir } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 
-const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const backendRoot = path.resolve(scriptDir, "..");
-const scanRoots = [path.join(backendRoot, "src"), path.join(backendRoot, "scripts")];
-const ignoredDirs = new Set(["node_modules", "dist", ".git"]);
+const root = new URL("../src/", import.meta.url);
+const rootPath = new URL(root).pathname;
 const files = [];
 
-function walk(directory) {
-  if (!fs.existsSync(directory)) return;
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    const fullPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (!ignoredDirs.has(entry.name)) walk(fullPath);
-    } else if (/\.(?:js|mjs|cjs)$/.test(entry.name)) {
-      files.push(fullPath);
-    }
+async function collect(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) await collect(path);
+    else if (entry.isFile() && path.endsWith(".js")) files.push(path);
   }
 }
 
-for (const root of scanRoots) walk(root);
-if (files.length === 0) {
-  console.error("No JavaScript files found under backend/src or backend/scripts.");
-  process.exit(2);
-}
-
-let failed = 0;
+await collect(rootPath);
+let failed = false;
 for (const file of files) {
   const result = spawnSync(process.execPath, ["--check", file], { encoding: "utf8" });
-  if (result.status === 0) continue;
-  failed += 1;
-  console.error(`FAIL  ${path.relative(backendRoot, file)}`);
-  if (result.stderr) console.error(result.stderr.trim());
+  if (result.status !== 0) {
+    failed = true;
+    process.stderr.write(`FAIL ${relative(rootPath, file)}\n${result.stderr || result.stdout}`);
+  }
 }
-
-if (failed > 0) {
-  console.error(`\nSyntax check failed for ${failed} of ${files.length} files.`);
-  process.exit(1);
-}
-console.log(`PASS  Node syntax check passed for all ${files.length} backend JavaScript files.`);
+if (failed) process.exit(1);
+console.log(`PASS syntax check for ${files.length} backend JavaScript files.`);

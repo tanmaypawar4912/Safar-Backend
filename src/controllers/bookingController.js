@@ -167,11 +167,14 @@ export const createBooking = async (req, res) => {
         key: "default",
       }).lean();
 
-      const maxCodKm = Number(
+      const configuredCodKm = Number(
         setting?.codMaxDistanceKm ??
         process.env.COD_MAX_DISTANCE_KM ??
         25
       );
+      const maxCodKm = Number.isFinite(configuredCodKm) && configuredCodKm >= 0
+        ? configuredCodKm
+        : 25;
 
       if (estimate.route.distanceKm > maxCodKm) {
         throw createHttpError(

@@ -13,7 +13,8 @@
     "seed:commission": "node src/scripts/seedCommissionRules.js",
     "test:ledger": "node --test src/scripts/financialLedger.test.js",
     "test:settlements": "node --test src/scripts/driverSettlement.test.js",
-    "test:commission": "node --test src/scripts/commissionCalculation.test.js"
+    "test:commission": "node --test src/scripts/commissionCalculation.test.js",
+    "test": "node --test src/scripts/*.test.js"
   },
   "keywords": [
     "logistics",
@@ -44,5 +45,8 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
+  },
+  "engines": {
+    "node": ">=22.22.0"
   }
 }

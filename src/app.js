@@ -19,6 +19,7 @@ import commissionRoutes from "./routes/commissionRoutes.js";
 import financialLedgerRoutes from "./routes/financialLedgerRoutes.js";
 import driverSettlementRoutes from "./routes/driverSettlementRoutes.js";
 import enterpriseRoutes from "./routes/enterpriseRoutes.js";
+import { createRequestOriginGuard } from "./middleware/requestOriginGuard.js";
 
 const app = express();
 
@@ -56,6 +57,11 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
+// Cookie-authenticated mutation endpoints reject untrusted browser origins.
+// Requests from Postman/server jobs without Origin remain supported unless
+// Fetch Metadata explicitly identifies them as cross-site browser requests.
+app.use(createRequestOriginGuard(allowedOrigins));
 
 app.use(helmet());
 

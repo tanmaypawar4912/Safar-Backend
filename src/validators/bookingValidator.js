@@ -26,6 +26,12 @@ export const createBookingSchema = z.object({
     .min(3, "Enter a valid drop address")
     .max(256),
 
+  // Preserve the server-signed Mapbox selections from the fare estimate.
+  // Without these fields Zod strips them and booking creation re-geocodes
+  // address text, which can produce a different route and false COD rejection.
+  pickupLocationToken: z.string().max(4096).optional(),
+  dropLocationToken: z.string().max(4096).optional(),
+
   vehicleId: z
     .string()
     .regex(/^[a-f\d]{24}$/i, "Invalid vehicle ID"),
